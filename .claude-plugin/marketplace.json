@@ -1,0 +1,11 @@
+{
+  "name": "knit",
+  "owner": { "name": "Knit", "url": "https://www.getknit.dev" },
+  "plugins": [
+    {
+      "name": "knit",
+      "source": "./plugins/knit",
+      "description": "Take actions in your third-party business apps through Knit."
+    }
+  ]
+}
