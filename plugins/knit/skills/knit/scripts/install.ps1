@@ -52,6 +52,24 @@ $McpName = "knit-mcp"
 function Fail($msg) { Write-Error "knit install: $msg"; exit 1 }
 function Note($msg) { Write-Host "  $msg" }
 
+# Agents this run changed (their MCP entry was added or removed), so the last message can say which ones to restart.
+$script:DoneAgents = @()
+function Done-Agent($name) { if ($script:DoneAgents -notcontains $name) { $script:DoneAgents += $name } }
+function Restart-Text($name) {
+  switch ($name) {
+    "claude"      { return "Claude Code: restart it, or run /mcp inside it and reconnect knit-mcp" }
+    "codex"       { return "Codex: quit and start a new Codex session, then run /mcp to check" }
+    "cursor"      { return "Cursor: restart Cursor (or toggle knit-mcp in Settings > MCP)" }
+    "antigravity" { return "Antigravity: reload MCP servers (/mcp in the CLI, refresh in the IDE) or restart it" }
+  }
+}
+function Show-Restart($purpose) {
+  if (-not $script:DoneAgents.Count) { Write-Host ""; Write-Host "Nothing was changed, so nothing needs restarting."; return }
+  Write-Host ""
+  Write-Host "Restart ${purpose}:"
+  foreach ($a in $script:DoneAgents) { Write-Host "  - $(Restart-Text $a)" }
+}
+
 # One table maps a region to its MCP URL. Only eu exists for now; add a line per new region.
 # KNIT_MCP_URL overrides it (for testing against another server).
 switch ($Region) {
@@ -205,7 +223,7 @@ The Knit installer has already added the `knit-mcp` server to this agent, but ag
 1. `list_supported_apps` finds the exact app id. If the app is not listed, tell the user, and offer `request_integration`.
 2. `find_apis_for_use_case` gives the documented request and response. Skip it if you already know the endpoint.
 3. `execute_api` runs the call. Prefer a read-only GET first when exploring.
-4. In code you write, use the curl from `include_curl` or `dry_run`. It reads the server address from `$MCP_BASE_URL` (set it to `__KNIT_BASE_URL__`) and the identity from `~/.knit/identity`.
+4. In code you write, use the curl from `include_curl` or `dry_run`. It calls `__KNIT_BASE_URL__` and reads the identity from `~/.knit/identity`.
 5. No `integration_id` for the app yet? `create_integration_link` returns a link for the user to open and connect their account. Keep working on everything that needs no connection while they do.
 
 `get_account` is free and shows how many trial calls are left.
@@ -256,7 +274,7 @@ function Install-Claude($token) {
   if (Has-Claude) {
     Invoke-Claude @("mcp", "remove", $McpName, "--scope", "user")
     Invoke-Claude @("mcp", "add", "--scope", "user", "--transport", "http", $McpName, $McpUrl, "--header", "X-Knit-Client-Id: $token")
-    Note "Claude Code: added $McpName (user scope)"
+    Note "Claude Code: added $McpName (user scope)"; Done-Agent "claude"
   } elseif ($Explicit) {
     Note "Claude Code: the 'claude' command was not found. Run this once it is installed:"
     Note "  claude mcp add --scope user --transport http $McpName $McpUrl --header `"X-Knit-Client-Id: <contents of ~\.knit\identity>`""
@@ -284,7 +302,7 @@ function Install-Codex($token) {
     $block = "$CodexStart`n[mcp_servers.$McpName]`nurl = `"$McpUrl`"`nhttp_headers = { `"X-Knit-Client-Id`" = `"$token`" }`n$CodexEnd`n"
     Write-Text $cfg ($text + $block)
     Restrict-File $cfg
-    Note "Codex: added $McpName to $cfg"
+    Note "Codex: added $McpName to $cfg"; Done-Agent "codex"
   }
   Put-Skill $AgentsSkillsDir "Codex"
   if (-not $NoInstructions) {
@@ -307,7 +325,7 @@ function Set-JsonServer($label, $cfg, $urlKey, $token) {
     $data.mcpServers | Add-Member -NotePropertyName $McpName -NotePropertyValue $entry -Force
     Write-Text $cfg (($data | ConvertTo-Json -Depth 20) + "`n")
     Restrict-File $cfg
-    Note "${label}: added $McpName to $cfg"
+    Note "${label}: added $McpName to $cfg"; Done-Agent ($label.ToLower())
   } catch {
     Note "${label}: could not update $cfg (is it valid JSON?). Add this under `"mcpServers`":"
     Note "  `"$McpName`": { `"$urlKey`": `"$McpUrl`", `"headers`": { `"X-Knit-Client-Id`": `"<contents of ~\.knit\identity>`" } }"
@@ -323,7 +341,7 @@ function Remove-JsonServer($label, $cfg) {
       $data.mcpServers.PSObject.Properties.Remove($McpName)
       if (-not @($data.mcpServers.PSObject.Properties).Count) { $data.PSObject.Properties.Remove("mcpServers") }
       if (@($data.PSObject.Properties).Count) { Write-Text $cfg (($data | ConvertTo-Json -Depth 20) + "`n") } else { Remove-Item -Force $cfg }
-      Note "${label}: removed $McpName"
+      Note "${label}: removed $McpName"; Done-Agent ($label.ToLower())
     }
   } catch { Note "${label}: could not update $cfg" }
 }
@@ -354,14 +372,14 @@ function Install-Antigravity($token) {
 # Removes what this installer added, for the agents selected with -Agents (default: all).
 function Uninstall-All {
   if (Wants "claude") {
-    if (Has-Claude) { Invoke-Claude @("mcp", "remove", $McpName, "--scope", "user"); Note "Claude Code: removed $McpName" }
+    if (Has-Claude) { Invoke-Claude @("mcp", "remove", $McpName, "--scope", "user"); Note "Claude Code: removed $McpName"; Done-Agent "claude" }
     Drop-Block (Join-Path $ClaudeDir "CLAUDE.md") $InstrStart $InstrEnd "Claude Code"
     Remove-Skill $ClaudeSkillsDir "Claude Code"
   }
   if (Wants "codex") {
     $cfg = Join-Path $CodexDir "config.toml"
     if ((Test-Path $cfg) -and (Read-Text $cfg).Contains($CodexStart)) {
-      Remove-Block $cfg $CodexStart $CodexEnd; Note "Codex: removed $McpName"
+      Remove-Block $cfg $CodexStart $CodexEnd; Note "Codex: removed $McpName"; Done-Agent "codex"
     }
     Remove-IfBlank $cfg
     Drop-Block (Join-Path $CodexDir "AGENTS.md") $InstrStart $InstrEnd "Codex"
@@ -412,7 +430,7 @@ function Show-Plan($planAgents) {
   Write-Host ""
   Write-Host "This will:"
   if (Test-Path $IdFile) { Write-Host "  - reuse your Knit trial identity in $IdFile" }
-  else { Write-Host "  - create a Knit trial identity (500 calls, 30 days) in $IdFile, readable only by you" }
+  else { Write-Host "  - create a Knit trial identity (2,000 calls, 30 days) in $IdFile, readable only by you" }
   Write-Host "  - send that identity to $McpUrl with every request"
   Write-Host ""
   foreach ($a in $planAgents) {
@@ -439,7 +457,8 @@ if ($Uninstall) {
   Write-Host ""
   Uninstall-All
   Write-Host ""
-  Write-Host "Done. Restart your agents so they drop `"$McpName`"."
+  Write-Host "Done."
+  Show-Restart "these so they drop `"$McpName`""
   exit 0
 }
 
@@ -464,5 +483,7 @@ foreach ($a in $planAgents) {
 }
 
 Write-Host ""
-Write-Host "Done. Restart your agent (or reconnect MCP servers) so it picks up `"$McpName`"."
+Write-Host "Done."
+Show-Restart "these so they pick up `"$McpName`" (agents load MCP servers when they start)"
+Write-Host ""
 Write-Host "Your trial identity is in $IdFile. Keep it private: it is how your Knit trial account is found."

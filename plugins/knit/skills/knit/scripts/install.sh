@@ -35,6 +35,24 @@ UNINSTALL=0
 die()  { printf 'knit install: %s\n' "$*" >&2; exit 1; }
 note() { printf '  %s\n' "$*"; }
 
+# Agents this run changed (their MCP entry was added or removed), so the last message can say which ones to restart.
+DONE_AGENTS=""
+done_agent() { case " $DONE_AGENTS " in *" $1 "*) ;; *) DONE_AGENTS="${DONE_AGENTS} $1" ;; esac; }
+restart_text() {
+  case "$1" in
+    claude)      echo "Claude Code: restart it, or run /mcp inside it and reconnect knit-mcp" ;;
+    codex)       echo "Codex: quit and start a new Codex session, then run /mcp to check" ;;
+    cursor)      echo "Cursor: restart Cursor (or toggle knit-mcp in Settings > MCP)" ;;
+    antigravity) echo "Antigravity: reload MCP servers (/mcp in the CLI, refresh in the IDE) or restart it" ;;
+  esac
+}
+print_restart() {   # $1 = what the restart is for
+  local a
+  if [ -z "$DONE_AGENTS" ]; then printf '\nNothing was changed, so nothing needs restarting.\n'; return 0; fi
+  printf '\nRestart %s:\n' "$1"
+  for a in $DONE_AGENTS; do printf '  - %s\n' "$(restart_text "$a")"; done
+}
+
 # Printed by --help. Kept inside the script so it also works when the script is piped in (curl ... | bash).
 usage() {
   cat <<'EOF'
@@ -213,7 +231,7 @@ The Knit installer has already added the `knit-mcp` server to this agent, but ag
 1. `list_supported_apps` finds the exact app id. If the app is not listed, tell the user, and offer `request_integration`.
 2. `find_apis_for_use_case` gives the documented request and response. Skip it if you already know the endpoint.
 3. `execute_api` runs the call. Prefer a read-only GET first when exploring.
-4. In code you write, use the curl from `include_curl` or `dry_run`. It reads the server address from `$MCP_BASE_URL` (set it to `__KNIT_BASE_URL__`) and the identity from `~/.knit/identity`.
+4. In code you write, use the curl from `include_curl` or `dry_run`. It calls `__KNIT_BASE_URL__` and reads the identity from `~/.knit/identity`.
 5. No `integration_id` for the app yet? `create_integration_link` returns a link for the user to open and connect their account. Keep working on everything that needs no connection while they do.
 
 `get_account` is free and shows how many trial calls are left.
@@ -258,7 +276,7 @@ install_claude() {
   if has_claude; then
     claude mcp remove "$MCP_NAME" --scope user >/dev/null 2>&1 || true
     claude mcp add --scope user --transport http "$MCP_NAME" "$MCP_URL" --header "X-Knit-Client-Id: ${TOKEN}" >/dev/null
-    note "Claude Code: added $MCP_NAME (user scope)"
+    note "Claude Code: added $MCP_NAME (user scope)"; done_agent claude
   else
     explicit && note "Claude Code: the 'claude' command was not found. Run this once it is installed:"
     explicit && note "  claude mcp add --scope user --transport http $MCP_NAME $MCP_URL --header \"X-Knit-Client-Id: \$(cat ~/.knit/identity)\""
@@ -286,7 +304,7 @@ install_codex() {
       printf '%s\n[mcp_servers.%s]\nurl = "%s"\nhttp_headers = { "X-Knit-Client-Id" = "%s" }\n%s\n' \
         "$CODEX_START" "$MCP_NAME" "$MCP_URL" "$TOKEN" "$CODEX_END"; } >> "$cfg"
     chmod 600 "$cfg" 2>/dev/null || true
-    note "Codex: added $MCP_NAME to $cfg"
+    note "Codex: added $MCP_NAME to $cfg"; done_agent codex
   fi
   put_skill "$AGENTS_SKILLS_DIR" "Codex"
   if [ "$DO_INSTR" = 1 ]; then
@@ -348,7 +366,7 @@ install_cursor() {
   mkdir -p "$CURSOR_DIR"
   if json_merge "$cfg" url; then
     chmod 600 "$cfg" 2>/dev/null || true
-    note "Cursor: added $MCP_NAME to $cfg"
+    note "Cursor: added $MCP_NAME to $cfg"; done_agent cursor
   else
     note "Cursor: could not update $cfg (it needs python3 or jq, or the file is not valid JSON). Add this under \"mcpServers\":"
     note "  \"$MCP_NAME\": { \"url\": \"$MCP_URL\", \"headers\": { \"X-Knit-Client-Id\": \"<contents of ~/.knit/identity>\" } }"
@@ -368,7 +386,7 @@ install_antigravity() {
   mkdir -p "${GEMINI_DIR}/config"
   if json_merge "$cfg" serverUrl; then
     chmod 600 "$cfg" 2>/dev/null || true
-    note "Antigravity: added $MCP_NAME to $cfg"
+    note "Antigravity: added $MCP_NAME to $cfg"; done_agent antigravity
   else
     note "Antigravity: could not update $cfg (it needs python3 or jq, or the file is not valid JSON). Add this under \"mcpServers\":"
     note "  \"$MCP_NAME\": { \"serverUrl\": \"$MCP_URL\", \"headers\": { \"X-Knit-Client-Id\": \"<contents of ~/.knit/identity>\" } }"
@@ -384,20 +402,20 @@ install_antigravity() {
 # Removes what this installer added, for the agents selected with --agents (default: all).
 uninstall_all() {
   if want claude; then
-    if has_claude; then claude mcp remove "$MCP_NAME" --scope user >/dev/null 2>&1 && note "Claude Code: removed $MCP_NAME" || true; fi
+    if has_claude; then claude mcp remove "$MCP_NAME" --scope user >/dev/null 2>&1 && { note "Claude Code: removed $MCP_NAME"; done_agent claude; } || true; fi
     drop_block "${CLAUDE_DIR}/CLAUDE.md" "$INSTR_START" "$INSTR_END" "Claude Code"
     rm_skill "$CLAUDE_SKILLS_DIR" "Claude Code"
   fi
   if want codex; then
     if [ -f "${CODEX_DIR}/config.toml" ] && grep -Fq "$CODEX_START" "${CODEX_DIR}/config.toml"; then
-      strip_block "${CODEX_DIR}/config.toml" "$CODEX_START" "$CODEX_END"; note "Codex: removed $MCP_NAME"
+      strip_block "${CODEX_DIR}/config.toml" "$CODEX_START" "$CODEX_END"; note "Codex: removed $MCP_NAME"; done_agent codex
     fi
     rm_if_blank "${CODEX_DIR}/config.toml"
     drop_block "${CODEX_DIR}/AGENTS.md" "$INSTR_START" "$INSTR_END" "Codex"
   fi
   if want cursor; then
     if [ -f "${CURSOR_DIR}/mcp.json" ] && grep -Fq "\"$MCP_NAME\"" "${CURSOR_DIR}/mcp.json"; then
-      json_remove "${CURSOR_DIR}/mcp.json" && note "Cursor: removed $MCP_NAME"
+      json_remove "${CURSOR_DIR}/mcp.json" && { note "Cursor: removed $MCP_NAME"; done_agent cursor; }
     fi
   fi
   # Codex and Cursor read the same skill folder, so it only goes when both are being removed.
@@ -411,7 +429,7 @@ uninstall_all() {
   fi
   if want antigravity; then
     if [ -f "${GEMINI_DIR}/config/mcp_config.json" ] && grep -Fq "\"$MCP_NAME\"" "${GEMINI_DIR}/config/mcp_config.json"; then
-      json_remove "${GEMINI_DIR}/config/mcp_config.json" && note "Antigravity: removed $MCP_NAME"
+      json_remove "${GEMINI_DIR}/config/mcp_config.json" && { note "Antigravity: removed $MCP_NAME"; done_agent antigravity; }
     fi
     drop_block "${GEMINI_DIR}/GEMINI.md" "$INSTR_START" "$INSTR_END" "Antigravity"
     rm_skill "$ANTIGRAVITY_SKILLS_DIR" "Antigravity"
@@ -449,7 +467,7 @@ plan_agent() {
 print_install_plan() {
   printf '\nThis will:\n'
   if [ -f "$ID_FILE" ]; then printf '  - reuse your Knit trial identity in %s\n' "$ID_FILE"
-  else printf '  - create a Knit trial identity (500 calls, 30 days) in %s, readable only by you\n' "$ID_FILE"; fi
+  else printf '  - create a Knit trial identity (2,000 calls, 30 days) in %s, readable only by you\n' "$ID_FILE"; fi
   printf '  - send that identity to %s with every request\n\n' "$MCP_URL"
   local a
   for a in $PLAN_AGENTS; do
@@ -470,7 +488,8 @@ if [ "$UNINSTALL" = 1 ]; then
   printf '\nRemoving what the Knit installer added (the knit-mcp server entries, the Knit skill files and the Knit notes).\n'
   printf 'Your Knit identity in %s is kept.\n\n' "$ID_FILE"
   uninstall_all
-  printf '\nDone. Restart your agents so they drop "%s".\n' "$MCP_NAME"
+  printf '\nDone.\n'
+  print_restart "these so they drop \"$MCP_NAME\""
   exit 0
 fi
 
@@ -486,5 +505,7 @@ print_install_plan
 ensure_identity
 for a in $PLAN_AGENTS; do "install_$a"; done
 
-printf '\nDone. Restart your agent (or reconnect MCP servers) so it picks up "%s".\n' "$MCP_NAME"
+printf '\nDone.\n'
+print_restart "these so they pick up \"$MCP_NAME\" (agents load MCP servers when they start)"
+printf '\n'
 printf 'Your trial identity is in %s. Keep it private: it is how your Knit trial account is found.\n' "$ID_FILE"
