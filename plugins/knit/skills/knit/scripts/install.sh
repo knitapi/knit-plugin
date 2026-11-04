@@ -230,9 +230,10 @@ The Knit installer has already added the `knit-mcp` server to this agent, but ag
 
 1. `list_supported_apps` finds the exact app id. If the app is not listed, tell the user, and offer `request_integration`.
 2. `find_apis_for_use_case` gives the documented request and response. Skip it if you already know the endpoint.
-3. `execute_api` runs the call. Prefer a read-only GET first when exploring.
-4. In code you write, use the curl from `include_curl` or `dry_run`. It calls `__KNIT_BASE_URL__` and reads the identity from `~/.knit/identity`.
-5. No `integration_id` for the app yet? `create_integration_link` returns a link for the user to open and connect their account. Keep working on everything that needs no connection while they do.
+3. `get_app_integration_info` is the read-only reference for the app's base URL(s) and how users connect their account. It returns documentation, never credentials, and you do not need it to authenticate (Knit does that). Use it to find the base URL when you need `execute_api`'s `path`: strip the base from the documented URL, tenant and service parts included (for Workday SOAP the base already ends in `/service/<tenant>`), and never put `{placeholders}` in `path`.
+4. `execute_api` runs the call. Prefer a read-only GET first when exploring.
+5. In code you write, use the curl from `include_curl` or `dry_run`. It calls `__KNIT_BASE_URL__` and reads the identity from `~/.knit/identity`.
+6. No `integration_id` for the app yet? `create_integration_link` returns a link for the user to open and connect their account. Keep working on everything that needs no connection while they do.
 
 `get_account` is free and shows how many trial calls are left.
 
