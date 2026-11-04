@@ -1,0 +1,14 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "knit",
+  "displayName": "Knit",
+  "version": "0.1.0",
+  "description": "Take actions in your third-party business apps (HRIS, payroll, CRM, ERP, accounting) through Knit, with authentication, call logging and issue tracking handled.",
+  "author": { "name": "Knit", "url": "https://www.getknit.dev" },
+  "homepage": "https://www.getknit.dev",
+  "keywords": ["knit", "mcp", "integrations", "hris", "payroll", "crm", "erp", "accounting"],
+  "suggestedPrompts": [
+    "Set up Knit so you can work with my business apps",
+    "List the apps Knit supports"
+  ]
+}

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Knit MCP installer for Claude Code, Codex and Cursor (Linux and macOS).
+# Knit MCP installer for Claude Code, Codex, Cursor and Antigravity (Linux and macOS).
 #
-#   bash install.sh [--agents claude,codex,cursor|all] [--region eu]
+#   bash install.sh [--agents claude,codex,cursor,antigravity|all] [--region eu]
 #                   [--instructions | --no-instructions] [--uninstall]
 #
 # What it does:
@@ -50,6 +50,7 @@ ID_FILE="${KNIT_DIR}/identity"
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"
 CODEX_DIR="${CODEX_HOME:-${HOME}/.codex}"
 CURSOR_DIR="${HOME}/.cursor"
+GEMINI_DIR="${HOME}/.gemini"                         # Antigravity (IDE and CLI) share ${GEMINI_DIR}/config/mcp_config.json
 TOKEN_RE="^idn_${REGION}_[0-9a-f]{16}\\.[A-Za-z0-9_-]{20,128}\$"
 
 # ---------------------------------------------------------------------------------- which agents
@@ -57,12 +58,16 @@ want() { case ",${AGENTS}," in *,all,*|*,"$1",*) return 0 ;; *) return 1 ;; esac
 explicit() { [ "$AGENTS" != "all" ]; }
 
 for a in $(printf '%s' "$AGENTS" | tr ',' ' '); do
-  case "$a" in all|claude|codex|cursor) ;; *) die "unknown agent '$a' (use claude, codex, cursor or all)" ;; esac
+  case "$a" in all|claude|codex|cursor|antigravity) ;; *) die "unknown agent '$a' (use claude, codex, cursor, antigravity or all)" ;; esac
 done
 
 has_claude() { command -v claude >/dev/null 2>&1; }
 has_codex()  { command -v codex  >/dev/null 2>&1 || [ -d "$CODEX_DIR" ]; }
 has_cursor() { command -v cursor >/dev/null 2>&1 || [ -d "$CURSOR_DIR" ]; }
+has_antigravity() {
+  command -v antigravity >/dev/null 2>&1 || command -v agy >/dev/null 2>&1 \
+    || [ -d "${GEMINI_DIR}/config" ] || [ -d "${GEMINI_DIR}/antigravity-ide" ] || [ -d "${GEMINI_DIR}/antigravity-cli" ]
+}
 
 # ------------------------------------------------------------------------------------- identity
 random_hex() { head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
@@ -167,41 +172,70 @@ install_codex() {
   fi
 }
 
-# json_set FILE : add/replace mcpServers["knit-mcp"] in a Cursor mcp.json (python3, else jq).
-cursor_merge() {
-  local file="$1"
+# json_merge FILE URL_KEY : add/replace mcpServers["knit-mcp"] in an agent's MCP JSON file (python3, else jq).
+# URL_KEY is the field that holds the server address: "url" for Cursor, "serverUrl" for Antigravity.
+# The other servers in the file are kept as they are.
+json_merge() {
+  local file="$1" urlkey="$2"
   if command -v python3 >/dev/null 2>&1; then
-    python3 - "$file" "$MCP_NAME" "$MCP_URL" "$TOKEN" <<'PY'
+    python3 - "$file" "$MCP_NAME" "$MCP_URL" "$TOKEN" "$urlkey" <<'PY'
 import json, os, sys
-path, name, url, token = sys.argv[1:5]
+path, name, url, token, urlkey = sys.argv[1:6]
 data = {}
 if os.path.exists(path) and os.path.getsize(path):
     with open(path) as f:
         data = json.load(f)
-data.setdefault("mcpServers", {})[name] = {"url": url, "headers": {"X-Knit-Client-Id": token}}
+data.setdefault("mcpServers", {})[name] = {urlkey: url, "headers": {"X-Knit-Client-Id": token}}
 with open(path, "w") as f:
     json.dump(data, f, indent=2); f.write("\n")
 PY
   elif command -v jq >/dev/null 2>&1; then
     local src="$file"; [ -s "$file" ] || { src="$file.knit.empty"; echo '{}' > "$src"; }
-    jq --arg n "$MCP_NAME" --arg u "$MCP_URL" --arg t "$TOKEN" \
-      '.mcpServers = ((.mcpServers // {}) + {($n): {url: $u, headers: {"X-Knit-Client-Id": $t}}})' "$src" > "$file.knit.tmp"
+    jq --arg n "$MCP_NAME" --arg u "$MCP_URL" --arg t "$TOKEN" --arg k "$urlkey" \
+      '.mcpServers = ((.mcpServers // {}) + {($n): {($k): $u, headers: {"X-Knit-Client-Id": $t}}})' "$src" > "$file.knit.tmp"
     mv "$file.knit.tmp" "$file"; rm -f "$file.knit.empty"
   else
     return 1
   fi
 }
 
+# json_remove FILE : remove mcpServers["knit-mcp"] from an agent's MCP JSON file (needs python3).
+json_remove() {
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$1" "$MCP_NAME" <<'PY'
+import json, sys
+path, name = sys.argv[1:3]
+with open(path) as f:
+    data = json.load(f)
+data.get("mcpServers", {}).pop(name, None)
+with open(path, "w") as f:
+    json.dump(data, f, indent=2); f.write("\n")
+PY
+}
+
 install_cursor() {
   has_cursor || { explicit && note "Cursor: not found, skipped"; return 0; }
   local cfg="${CURSOR_DIR}/mcp.json"
   mkdir -p "$CURSOR_DIR"
-  if cursor_merge "$cfg"; then
+  if json_merge "$cfg" url; then
     chmod 600 "$cfg" 2>/dev/null || true
     note "Cursor: added $MCP_NAME to $cfg"
   else
     note "Cursor: could not update $cfg (it needs python3 or jq, or the file is not valid JSON). Add this under \"mcpServers\":"
     note "  \"$MCP_NAME\": { \"url\": \"$MCP_URL\", \"headers\": { \"X-Knit-Client-Id\": \"<contents of ~/.knit/identity>\" } }"
+  fi
+}
+
+install_antigravity() {
+  has_antigravity || { explicit && note "Antigravity: not found, skipped"; return 0; }
+  local cfg="${GEMINI_DIR}/config/mcp_config.json"
+  mkdir -p "${GEMINI_DIR}/config"
+  if json_merge "$cfg" serverUrl; then
+    chmod 600 "$cfg" 2>/dev/null || true
+    note "Antigravity: added $MCP_NAME to $cfg"
+  else
+    note "Antigravity: could not update $cfg (it needs python3 or jq, or the file is not valid JSON). Add this under \"mcpServers\":"
+    note "  \"$MCP_NAME\": { \"serverUrl\": \"$MCP_URL\", \"headers\": { \"X-Knit-Client-Id\": \"<contents of ~/.knit/identity>\" } }"
   fi
 }
 
@@ -211,17 +245,8 @@ uninstall_all() {
   strip_block "${CLAUDE_DIR}/CLAUDE.md" "$INSTR_START" "$INSTR_END"
   if [ -f "${CODEX_DIR}/config.toml" ]; then strip_block "${CODEX_DIR}/config.toml" "$CODEX_START" "$CODEX_END"; note "Codex: removed $MCP_NAME"; fi
   strip_block "${CODEX_DIR}/AGENTS.md" "$INSTR_START" "$INSTR_END"
-  if [ -f "${CURSOR_DIR}/mcp.json" ] && command -v python3 >/dev/null 2>&1; then
-    python3 - "${CURSOR_DIR}/mcp.json" "$MCP_NAME" <<'PY' && note "Cursor: removed $MCP_NAME"
-import json, sys
-path, name = sys.argv[1:3]
-with open(path) as f:
-    data = json.load(f)
-data.get("mcpServers", {}).pop(name, None)
-with open(path, "w") as f:
-    json.dump(data, f, indent=2); f.write("\n")
-PY
-  fi
+  if [ -f "${CURSOR_DIR}/mcp.json" ]; then json_remove "${CURSOR_DIR}/mcp.json" && note "Cursor: removed $MCP_NAME"; fi
+  if [ -f "${GEMINI_DIR}/config/mcp_config.json" ]; then json_remove "${GEMINI_DIR}/config/mcp_config.json" && note "Antigravity: removed $MCP_NAME"; fi
   note "Left $ID_FILE in place so the same trial account can be used again. Delete ~/.knit to forget it."
 }
 
@@ -240,6 +265,7 @@ ensure_identity
 want claude && install_claude
 want codex  && install_codex
 want cursor && install_cursor
+want antigravity && install_antigravity
 
 printf '\nDone. Restart your agent (or reconnect MCP servers) so it picks up "%s".\n' "$MCP_NAME"
 printf 'Your trial identity is in %s. Keep it private: it is how your Knit trial account is found.\n' "$ID_FILE"

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Knit MCP installer for Claude Code, Codex and Cursor (Windows PowerShell 5.1 or PowerShell 7).
+  Knit MCP installer for Claude Code, Codex, Cursor and Antigravity (Windows PowerShell 5.1 or PowerShell 7).
 
 .DESCRIPTION
   1. Makes (or reuses) your Knit trial identity and keeps it in ~\.knit\identity.
@@ -39,7 +39,7 @@ if ($env:KNIT_MCP_URL) { $McpUrl = $env:KNIT_MCP_URL }
 
 $AgentList = @($Agents | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
 foreach ($a in $AgentList) {
-  if (@("all", "claude", "codex", "cursor") -notcontains $a) { Fail "unknown agent '$a' (use claude, codex, cursor or all)" }
+  if (@("all", "claude", "codex", "cursor", "antigravity") -notcontains $a) { Fail "unknown agent '$a' (use claude, codex, cursor, antigravity or all)" }
 }
 $Explicit = -not ($AgentList -contains "all")
 function Wants($name) { return ($AgentList -contains "all") -or ($AgentList -contains $name) }
@@ -49,6 +49,8 @@ $IdFile    = Join-Path $KnitDir "identity"
 $ClaudeDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME ".claude" }
 $CodexDir  = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME ".codex" }
 $CursorDir = Join-Path $HOME ".cursor"
+$GeminiDir = Join-Path $HOME ".gemini"                      # Antigravity IDE and CLI share config\mcp_config.json
+$AntigravityCfg = Join-Path (Join-Path $GeminiDir "config") "mcp_config.json"
 $TokenRe   = "^idn_$Region`_[0-9a-f]{16}\.[A-Za-z0-9_-]{20,128}$"
 
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -65,6 +67,10 @@ function Restrict-File($path) {
 function Has-Claude { return [bool](Get-Command claude -ErrorAction SilentlyContinue) }
 function Has-Codex  { return [bool](Get-Command codex -ErrorAction SilentlyContinue) -or (Test-Path $CodexDir) }
 function Has-Cursor { return [bool](Get-Command cursor -ErrorAction SilentlyContinue) -or (Test-Path $CursorDir) }
+function Has-Antigravity {
+  return [bool](Get-Command antigravity -ErrorAction SilentlyContinue) -or [bool](Get-Command agy -ErrorAction SilentlyContinue) `
+    -or (Test-Path (Join-Path $GeminiDir "config")) -or (Test-Path (Join-Path $GeminiDir "antigravity-ide")) -or (Test-Path (Join-Path $GeminiDir "antigravity-cli"))
+}
 
 # ------------------------------------------------------------------------------------- identity
 function New-Identity {
@@ -178,27 +184,47 @@ function Install-Codex($token, $withInstr) {
   }
 }
 
-function Install-Cursor($token) {
-  if (-not (Has-Cursor)) { if ($Explicit) { Note "Cursor: not found, skipped" }; return }
-  $cfg = Join-Path $CursorDir "mcp.json"
+# Add or replace mcpServers[knit-mcp] in an agent's MCP JSON file, keeping its other servers.
+# $urlKey is the field holding the address: "url" for Cursor, "serverUrl" for Antigravity.
+function Set-JsonServer($label, $cfg, $urlKey, $token) {
   try {
+    New-Item -ItemType Directory -Force -Path (Split-Path $cfg) | Out-Null
     $raw = Read-Text $cfg
     $data = if ($raw.Trim()) { $raw | ConvertFrom-Json } else { New-Object PSObject }
     if (-not $data.PSObject.Properties["mcpServers"]) {
       $data | Add-Member -NotePropertyName "mcpServers" -NotePropertyValue (New-Object PSObject)
     }
-    $entry = [PSCustomObject]@{
-      url     = $McpUrl
-      headers = [PSCustomObject]@{ "X-Knit-Client-Id" = $token }
-    }
+    $entry = [PSCustomObject]@{ $urlKey = $McpUrl; headers = [PSCustomObject]@{ "X-Knit-Client-Id" = $token } }
     $data.mcpServers | Add-Member -NotePropertyName $McpName -NotePropertyValue $entry -Force
     Write-Text $cfg (($data | ConvertTo-Json -Depth 20) + "`n")
     Restrict-File $cfg
-    Note "Cursor: added $McpName to $cfg"
+    Note "${label}: added $McpName to $cfg"
   } catch {
-    Note "Cursor: could not update $cfg (is it valid JSON?). Add this under `"mcpServers`":"
-    Note "  `"$McpName`": { `"url`": `"$McpUrl`", `"headers`": { `"X-Knit-Client-Id`": `"<contents of ~\.knit\identity>`" } }"
+    Note "${label}: could not update $cfg (is it valid JSON?). Add this under `"mcpServers`":"
+    Note "  `"$McpName`": { `"$urlKey`": `"$McpUrl`", `"headers`": { `"X-Knit-Client-Id`": `"<contents of ~\.knit\identity>`" } }"
   }
+}
+
+function Remove-JsonServer($label, $cfg) {
+  if (-not (Test-Path $cfg)) { return }
+  try {
+    $data = (Read-Text $cfg) | ConvertFrom-Json
+    if ($data.mcpServers -and $data.mcpServers.PSObject.Properties[$McpName]) {
+      $data.mcpServers.PSObject.Properties.Remove($McpName)
+      Write-Text $cfg (($data | ConvertTo-Json -Depth 20) + "`n")
+      Note "${label}: removed $McpName"
+    }
+  } catch { Note "${label}: could not update $cfg" }
+}
+
+function Install-Cursor($token) {
+  if (-not (Has-Cursor)) { if ($Explicit) { Note "Cursor: not found, skipped" }; return }
+  Set-JsonServer "Cursor" (Join-Path $CursorDir "mcp.json") "url" $token
+}
+
+function Install-Antigravity($token) {
+  if (-not (Has-Antigravity)) { if ($Explicit) { Note "Antigravity: not found, skipped" }; return }
+  Set-JsonServer "Antigravity" $AntigravityCfg "serverUrl" $token
 }
 
 function Uninstall-All {
@@ -207,17 +233,8 @@ function Uninstall-All {
   $cfg = Join-Path $CodexDir "config.toml"
   if (Test-Path $cfg) { Remove-Block $cfg $CodexStart $CodexEnd; Note "Codex: removed $McpName" }
   Remove-Block (Join-Path $CodexDir "AGENTS.md") $InstrStart $InstrEnd
-  $cursorCfg = Join-Path $CursorDir "mcp.json"
-  if (Test-Path $cursorCfg) {
-    try {
-      $data = (Read-Text $cursorCfg) | ConvertFrom-Json
-      if ($data.mcpServers -and $data.mcpServers.PSObject.Properties[$McpName]) {
-        $data.mcpServers.PSObject.Properties.Remove($McpName)
-        Write-Text $cursorCfg (($data | ConvertTo-Json -Depth 20) + "`n")
-        Note "Cursor: removed $McpName"
-      }
-    } catch { Note "Cursor: could not update $cursorCfg" }
-  }
+  Remove-JsonServer "Cursor" (Join-Path $CursorDir "mcp.json")
+  Remove-JsonServer "Antigravity" $AntigravityCfg
   Note "Left $IdFile in place so the same trial account can be used again. Delete ~\.knit to forget it."
 }
 
@@ -231,6 +248,7 @@ $token = Ensure-Identity
 if (Wants "claude") { Install-Claude $token $withInstr }
 if (Wants "codex")  { Install-Codex $token $withInstr }
 if (Wants "cursor") { Install-Cursor $token }
+if (Wants "antigravity") { Install-Antigravity $token }
 
 Write-Host ""
 Write-Host "Done. Restart your agent (or reconnect MCP servers) so it picks up `"$McpName`"."
