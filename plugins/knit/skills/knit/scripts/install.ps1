@@ -23,6 +23,7 @@
   agent calls a Knit tool. No API key is needed.
 
   Uses the Knit cloud address by default. Set the KNIT_MCP_URL environment variable to use another one (for testing).
+  Set KNIT_NO_PAUSE to skip the short pauses (they are also skipped when output is not a terminal).
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File install.ps1 -Agents claude,cursor
@@ -51,6 +52,30 @@ $McpName = "knit-mcp"
 
 function Fail($msg) { Write-Error "knit install: $msg"; exit 1 }
 function Note($msg) { Write-Host "  $msg" }
+
+# The Knit logo: two interlocking links (orange and slate) with the name beside them.
+# Rounded box characters on PowerShell 7 and later; plain ASCII on Windows PowerShell 5.1, whose console
+# often cannot show them.
+function Show-Logo {
+  if ($PSVersionTable.PSVersion.Major -ge 7) {
+    $tl = [string][char]0x256D; $tr = [string][char]0x256E; $bl = [string][char]0x2570; $br = [string][char]0x256F
+    $h  = [string][char]0x2500; $v  = [string][char]0x2502
+  } else { $tl = "."; $tr = "."; $bl = "'"; $br = "'"; $h = "-"; $v = "|" }
+  $o = "DarkYellow"; $n = "Gray"
+  function Seg($color, $text) { Write-Host $text -NoNewline -ForegroundColor $color }
+  Write-Host ""
+  Write-Host -NoNewline "  "; Seg $o "$tl$h$h$h$h$tr"; Write-Host ""
+  Write-Host -NoNewline "  "; Seg $o $v; Write-Host -NoNewline "  "; Seg $n "$tl$h"; Seg $o $v; Seg $n "$h$h$tr"
+  Write-Host -NoNewline "   "; Write-Host "Knit" -ForegroundColor White
+  Write-Host -NoNewline "  "; Seg $o "$bl$h$h"; Seg $n $v; Seg $o "$h$br"; Write-Host -NoNewline "  "; Seg $n $v
+  Write-Host "   getknit.dev"
+  Write-Host -NoNewline "     "; Seg $n "$bl$h$h$h$h$br"; Write-Host ""
+}
+
+# Wait a moment so the person can read what just printed. Skipped when the output is not a terminal (a log, a pipe)
+# or when KNIT_NO_PAUSE is set, so scripts and CI are never slowed down.
+function Can-Pause { return (-not [Console]::IsOutputRedirected) -and (-not $env:KNIT_NO_PAUSE) }
+function Pause-For($seconds) { if (Can-Pause) { Start-Sleep -Seconds $seconds } }
 
 # Agents this run changed (their MCP entry was added or removed), so the last message can say which ones to restart.
 $script:DoneAgents = @()
@@ -449,6 +474,8 @@ function Show-Plan($planAgents) {
 }
 
 # ----------------------------------------------------------------------------------------- run
+Show-Logo
+Write-Host ""
 Write-Host "Knit MCP installer (region: $Region)"
 
 if ($Uninstall) {
@@ -472,7 +499,12 @@ if (-not $planAgents.Count) {
 }
 
 Show-Plan $planAgents
+if (Can-Pause) {
+  Write-Host "Starting in a few seconds. Press Ctrl+C now if you do not want this."
+  Pause-For 5
+}
 
+Write-Host "Setting up..."
 $token = Ensure-Identity
 foreach ($a in $planAgents) {
   switch ($a) {
@@ -482,6 +514,7 @@ foreach ($a in $planAgents) {
     "antigravity" { Install-Antigravity $token }
   }
 }
+Pause-For 2
 
 Write-Host ""
 Write-Host "Done."

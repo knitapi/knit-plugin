@@ -35,6 +35,32 @@ UNINSTALL=0
 die()  { printf 'knit install: %s\n' "$*" >&2; exit 1; }
 note() { printf '  %s\n' "$*"; }
 
+# The Knit logo: two interlocking links (orange and slate) with the name beside them.
+# Rounded box characters when the terminal speaks UTF-8, plain ASCII otherwise. Colour only on a terminal,
+# and not when NO_COLOR is set.
+print_logo() {
+  local o='' n='' b='' off='' tl tr bl br h v
+  if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    o=$'\033[38;5;208m'; n=$'\033[38;5;67m'; b=$'\033[1m'; off=$'\033[0m'
+  fi
+  case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+    *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) tl='╭'; tr='╮'; bl='╰'; br='╯'; h='─'; v='│' ;;
+    *)                                 tl='.'; tr='.'; bl="'"; br="'"; h='-'; v='|' ;;
+  esac
+  printf '\n'
+  printf '  %s%s%s%s%s%s\n' "$o" "$tl$h$h$h$h$tr" "$off"
+  printf '  %s%s%s  %s%s%s%s%s%s%s%s%s   %sKnit%s\n' "$o" "$v" "$off" "$n" "$tl$h" "$off" "$o" "$v" "$off" "$n" "$h$h$tr" "$off" "$b" "$off"
+  printf '  %s%s%s%s%s%s%s%s%s  %s%s%s   getknit.dev\n' "$o" "$bl$h$h" "$off" "$n" "$v" "$off" "$o" "$h$br" "$off" "$n" "$v" "$off"
+  printf '     %s%s%s\n' "$n" "$bl$h$h$h$h$br" "$off"
+}
+
+# pause SECONDS : wait a moment so the person can read what just printed. Skipped when the output is not a
+# terminal (a log, a pipe) or when KNIT_NO_PAUSE is set, so scripts and CI are never slowed down.
+pause() {
+  if [ -t 1 ] && [ -z "${KNIT_NO_PAUSE:-}" ]; then sleep "$1"; fi
+  return 0
+}
+
 # Agents this run changed (their MCP entry was added or removed), so the last message can say which ones to restart.
 DONE_AGENTS=""
 done_agent() { case " $DONE_AGENTS " in *" $1 "*) ;; *) DONE_AGENTS="${DONE_AGENTS} $1" ;; esac; }
@@ -71,6 +97,7 @@ Knit MCP installer for Claude Code, Codex, Cursor and Antigravity (Linux and mac
 
 Environment:
   KNIT_MCP_URL      use this MCP address instead of the Knit cloud (for testing)
+  KNIT_NO_PAUSE     set to any value to skip the short pauses (they are also skipped when output is not a terminal)
 
 It makes (or reuses) a trial identity in ~/.knit/identity, adds the "knit-mcp" server to each agent
 with the identity sent as the X-Knit-Client-Id header, and makes no network requests.
@@ -483,7 +510,8 @@ print_install_plan() {
 }
 
 # ------------------------------------------------------------------------------------------ run
-printf 'Knit MCP installer (region: %s)\n' "$REGION"
+print_logo
+printf '\nKnit MCP installer (region: %s)\n' "$REGION"
 
 if [ "$UNINSTALL" = 1 ]; then
   printf '\nRemoving what the Knit installer added (the knit-mcp server entries, the Knit skill files and the Knit notes).\n'
@@ -502,9 +530,15 @@ if [ -z "$PLAN_AGENTS" ]; then
 fi
 
 print_install_plan
+if [ -t 1 ] && [ -z "${KNIT_NO_PAUSE:-}" ]; then
+  printf 'Starting in a few seconds. Press Ctrl+C now if you do not want this.\n'
+  pause 5
+fi
 
+printf 'Setting up...\n'
 ensure_identity
 for a in $PLAN_AGENTS; do "install_$a"; done
+pause 2
 
 printf '\nDone.\n'
 print_restart "these so they pick up \"$MCP_NAME\" (agents load MCP servers when they start)"
